@@ -1,0 +1,1 @@
+Script for plotting the reuslts of the paper using ABCD data release 5.1 entitled 'Breastfeeding duration is positively related to cortical thickness and cognition' by Jonatan Ottino-González et al. (2024). Last update: Aug 14th 2024. Author of code: Jonatan Ottino González.       
