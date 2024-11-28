@@ -759,32 +759,6 @@ legend2 <- ggpubr::get_legend(legend_plot2)
 
 ggsave(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/figures/fig3.png'), dpi = 300, width = 6, height = 5, scale = 3, plot = fig3)
 
-# For talk
-# 
-# (talk1 <- main.cth %>%
-#     mutate(col2 = ifelse(label %in% names.cth, 'steelblue', 'lightgray')) %>% 
-#     ggplot() +
-#     geom_brain(atlas = ggsegDesterieux::desterieux,    # or dk
-#                colour = 'black',
-#                position = position_brain(hemi ~ side),
-#                size = .5,
-#                aes(fill = col2)) +
-#     scale_fill_identity() +
-#     theme_brain2() +
-#     theme(plot.background = element_rect(fill = 'white', colour = NA)))
-# 
-# (talk2 <- main.area %>%
-#     mutate(col2 = ifelse(label %in% names.area, 'steelblue', 'lightgray')) %>% 
-#     ggplot() +
-#     geom_brain(atlas = ggsegDesterieux::desterieux,    # or dk
-#                colour = 'black',
-#                position = position_brain(hemi ~ side),
-#                size = .5,
-#                aes(fill = col2)) +
-#     scale_fill_identity() +
-#     theme_brain2() +
-#     theme(plot.background = element_rect(fill = 'white', colour = NA)))
-
 # ••••••••••••••••••••••••••••••••••••••••••••••••••• #
 # ~~~~~~~~~~~~~~~~~ F I G U R E  4 ~~~~~~~~~~~~~~~~~~ #   FLUID COGNITION -- THIS HAS TO BE ARRANGED IN BIO RENDER
 # ••••••••••••••••••••••••••••••••••••••••••••••••••• #
