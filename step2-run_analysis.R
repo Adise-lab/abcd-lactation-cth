@@ -1,12 +1,14 @@
 #~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#
 # Script for  analyzing ABCD data release 5.1 for the paper entitled                  #
 # 'Breastfeeding duration is positively related to cortical thickness and cognition'  #
-# by Jonatan Ottino-González et al. (2024). Last update: Aug 14th 2024                #
+# by Jonatan Ottino-González et al. (2024). Last update: Nov 19th 2024                #
 #~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#~#
 
 #1# Load libraries 
 
 pacman::p_load(tidyverse, data.table, summarytools)
+
+options(scipen = 999)
 
 #2# Set paths
 
@@ -14,352 +16,446 @@ datadir <- '/Users/jongonzalez/Desktop/abcd.nosync/'
 
 drivedir <- '/Users/jongonzalez/Library/CloudStorage/GoogleDrive-jonatanottino@gmail.com/.shortcut-targets-by-id/1-H3wnyMZIfSE18QmegCkCkmyQpjcPqtZ/Adise_lab/'
 
-#3# Load MRI data (CT) for main analysis
+# table for report
+vtable::st(table1 <- fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_MRI_data_original.csv'), stringsAsFactors = T) %>% 
+             mutate_at(vars(alcohol, tobacco, marihuana, opioids, opiates, cocaine), 
+                       ~factor(ifelse(. == 1, 'Yes', ifelse(. == 0, 'No', ifelse(. == 999, 'Do not know', 'Refuse to answer'))))) %>% 
+             mutate(bfq_duration = factor(case_when(bfq_duration == 0 ~ 'No breastfed',
+                                                    bfq_duration == 1 ~ '1-6 months',
+                                                    bfq_duration == 2 ~ '7-12 months',
+                                                    bfq_duration == 3 ~ '>12 months'), 
+                                          levels = c('No breastfed', '1-6 months', '7-12 months', '>12 months')),
+                    pregnancy_complications = factor(ifelse(pregnancy_complications == 0, 'No', ifelse(pregnancy_complications == 1, 'Yes', 'Do not know'))),
+                    birth_complications = factor(ifelse(birth_complications == 0, 'No', ifelse(birth_complications == 1, 'Yes', 'Do not know'))),
+                    premature_wk = na_if(premature_wk, 0),
+                    eventname = relevel(eventname, ref = 'baseline_year_1_arm_1')),
+           digits = 3,
+           vars = c('child_age', 'child_sex', 'pds', 'handedness', 'race', 'ethnicity', 'mode_of_delivery', 'birth_complications', 'pregnancy_complications', 
+           'premature', 'premature_wk', 'education3', 'annual_income', 'alcohol', 'tobacco', 'marihuana', 'opioids', 'opiates', 'cocaine', 'bfq_duration'), group = 'eventname')
 
-(covs2scale <- c('child_age', 'bfq_duration', 'premature_wk', 'education_max', 'handedness_c'))
+####################################
+####################################
+#4# Load CT data for main analysis #
+####################################
+####################################
 
-ct.df <- fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_MRI_data.csv')) %>% 
-  mutate_at(vars(all_of(covs2scale)), ~scale(., scale = F)) %>% 
-  select(., !ends_with('_myelin'))
+#3# Set common covariates
 
+(covs2scale <- c('bfq_duration', 'child_age', 'education2', 'smri_vol_scs_intracranialv')) # 'bfq_duration' --> watch out with mean-centering the main predictor; you want the intercept to reflect when bf is 0, if you mean-center then you shift the 0 to the mean of bf, which is 1.43
+
+brain <- 
+  # fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_MRI_data_original.csv'), stringsAsFactors = T) %>%               # ORIGINAL data (only combatt'd)
+  fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_MRI_data_no_outliers.csv'), stringsAsFactors = T) %>%              # no outliers (NAs) and those with NAs at baselien but not follow-up set to NAs at both timepoints
+  # fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_MRI_data_NO_COMBAT.csv'), stringsAsFactors = T) %>%             # regular data (no combatt'd)
+  mutate_at(vars(all_of(covs2scale)), ~scale(., scale = T)) %>%  # mean-center continous covariates
+  mutate(breastfed = as.factor(ifelse(bfq_duration > 0, 'Yes', 'No')),
+         handedness = factor(handedness),
+         child_sex = ifelse(child_sex == 'Male', 1, -1),   # effects code sex
+         premature = ifelse(premature == 'Yes', 1, -1),    # effects code premature
+         interaction = child_age * bfq_duration)
+
+contrasts(brain$handedness) <- contr.sum(levels(brain$handedness))
+
+ct.df <- brain %>% 
+  select(., !ends_with(c('_myelin', '_area', '_ratio'))) %>% 
+  as.data.table()
+
+# check multicollinearity function
+
+calculate_vif <- function(data) {
+  # Ensure the data is numeric
+  numeric_data <- as.data.frame(lapply(data, as.numeric))
+  # Compute the correlation matrix
+  cor_matrix <- cor(numeric_data)
+  # Compute the inverse of the correlation matrix
+  inv_cor_matrix <- solve(cor_matrix)
+  # Calculate VIF for each predictor
+  vif_values <- diag(inv_cor_matrix)
+  # Name the VIF values based on predictor names
+  names(vif_values) <- colnames(numeric_data)
+  return(vif_values)
+}
+
+# Select only the predictors you want to analyze for VIF
+predictors <- ct.df[, c('child_age', 'child_sex', 'premature', 'bfq_duration', 'education2', 'interaction', 'smri_vol_scs_intracranialv')]
+
+# Calculate VIFs
+(vif_results <- calculate_vif(predictors))
+
+# Set the DVs
 (featurenames <- names(ct.df %>% select(starts_with('mrisdp'))))
 
-model_list <- list()        # Initialize an empty list to store models
+cth.model_list <- list()        # Initialize an empty list to store models
 
 # Iterate over each feature name
 for (feature in featurenames) {
   # Construct the formula string for the current feature
-  formula_str <- paste0(feature, " ~ child_age * bfq_duration + mode_of_delivery + birth_complications_n + pregnancy_complications + premature_wk + education_max + handedness_c + child_sex + (1 | src_subject_id)")  
+  formula_str <- paste0(feature, " ~ child_age * bfq_duration + premature + education2 + child_sex + (1 | src_subject_id)")  
   # Fit the model using lmerTest::lmer and store in model_list
-  model <- lmerTest::lmer(as.formula(formula_str), data = ct.df)
-  model_list[[feature]] <- model
+  model <- lmerTest::lmer(as.formula(formula_str), data = ct.df)  
+  cth.model_list[[feature]] <- model
 }
 
-posthoc1 <- as.data.frame(matrix(NA, nrow = length(featurenames), ncol = 6))
+posthoc1 <- as.data.frame(matrix(NA, nrow = length(featurenames), ncol = 8))    # we will store all estimates and important values in this table
 
-for (i in 1:length(model_list)) {
-  posthoc1[,1][[i]] <- names(model_list[i])
-  # beta estimate
-  posthoc1[,2][[i]] <- summary(model_list[[i]])[[10]][3,1]     # 3 for main, 11 for interaction
-  # confidence intervals min [1] and max [2]
-  ci.tmp <- as.numeric(confint(model_list[[i]], 'bfq_duration'))
-  posthoc1[,3][[i]] <- ci.tmp[1]
-  posthoc1[,4][[i]] <- ci.tmp[2]
+for (i in 1:length(cth.model_list)) {
+  posthoc1[,1][[i]] <- names(cth.model_list[i])
+  posthoc1[,2][[i]] <- length(!is.na(resid(cth.model_list[[i]])))
+  # calculate beta estimate and CI (standardized)
+  ci.tmp <- effectsize::standardize_parameters(cth.model_list[[i]], method = 'basic')
+  # extract beta and CI
+  posthoc1[,3][[i]] <- ci.tmp[[2]][3]    # 3 main effect, 7 interaction
+  posthoc1[,4][[i]] <- ci.tmp[[4]][3]
+  posthoc1[,5][[i]] <- ci.tmp[[5]][3]
   # raw p-value
-  posthoc1[,5][[i]] <- summary(model_list[[i]])[[10]][3,5]
-  if (sum(is.na(posthoc1[,5]) < length(posthoc1[,5]))) {
-    names(posthoc1) <- c('ROI', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr')
-    posthoc1[,6] <- round(p.adjust(posthoc1[,5], method = 'fdr'), 5) }
+  posthoc1[,6][[i]] <- round(summary(cth.model_list[[i]])[[10]][3,5], 5)
+  if (sum(is.na(posthoc1[,6]) < length(posthoc1[,6]))) {
+    names(posthoc1) <- c('ROI', 'n', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr', 'fdr2')
+    posthoc1[,7] <- round(p.adjust(posthoc1[,6], method = 'BH'), 5) 
+    posthoc1[,8] <- round(mutoss::adaptiveBH(posthoc1[,6], 0.05, silent = T)$adjPValues, 5) }
+    # posthoc1[,8] <- round(cp4p::adjust.p(posthoc1[,6], pi0.method = 'bky', alpha = 0.05)$adjp[,2], 5) }
 }
 
 print(posthoc1)
 
-print(subset(posthoc1, posthoc1$`p-value` < 0.05))
+print(subset(posthoc1, posthoc1$`p-value` < 0.05))    # regions p < 0.05
 
-sum(posthoc1$`p-value` < 0.05)
+sum(posthoc1$`p-value` < 0.05)                       # number of regions p < 0.05
 
-print(subset(posthoc1, posthoc1$fdr < 0.05))
+print(subset(posthoc1, posthoc1$fdr < 0.05))        # regions fdr < 0.05
 
-(passed.fdr <- subset(posthoc1$ROI, posthoc1$fdr < 0.05))
+sum(posthoc1$fdr < 0.05)                          # number of regions fdr < 0.05
 
-sum(posthoc1$fdr < 0.05)
+(passed.fdr.cth <- subset(posthoc1$ROI, posthoc1$fdr < 0.05))    # save the regions that fdr < 0.05
+
+# this is to calculate the percentage change and for that we need the unstandardized coefficients
+
+significant.models.list <- lapply(passed.fdr.cth, function(model_name) {
+  cth.model_list[[model_name]]
+})
+
+dv <- c()
+raw.beta <- c()
+intercept <- c() 
+
+for (i in 1:length(passed.fdr.cth)) {
+  dv[i] <- passed.fdr.cth[i]
+  raw.beta[i] <- summary(significant.models.list[[i]])[[10]][3,1]
+  intercept[i] <- summary(significant.models.list[[i]])[[10]][1,1]
+}
+
+(ct.change <- cbind(raw.beta, intercept) %>% 
+  as.data.frame() %>% 
+  mutate(change = (raw.beta / intercept) * 100))
+
+mean(ct.change$raw.beta)     # for each increase in breastfeeding duration there was a +0.006mm increase in thickness
+
+mean(ct.change$change)       # this equals a +0.027% change
+
+# Look interactions now
+
+interaction.cth <- as.data.frame(matrix(NA, nrow = length(featurenames), ncol = 8))
+
+for (i in 1:length(cth.model_list)) {
+  interaction.cth[,1][[i]] <- names(cth.model_list[i])
+  interaction.cth[,2][[i]] <- length(!is.na(resid(cth.model_list[[i]])))
+  # confidence intervals
+  ci.tmp <- effectsize::standardize_parameters(cth.model_list[[i]], method = 'basic')
+  interaction.cth[,3][[i]] <- ci.tmp[[2]][7]    # 3 main effect, 7 interaction
+  interaction.cth[,4][[i]] <- ci.tmp[[4]][7]
+  interaction.cth[,5][[i]] <- ci.tmp[[5]][7]
+  # raw p-value
+  interaction.cth[,6][[i]] <- round(summary(cth.model_list[[i]])[[10]][7,5], 5)
+  if (sum(is.na(interaction.cth[,6]) < length(interaction.cth[,6]))) {
+    names(interaction.cth) <- c('ROI', 'n', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr', 'fdr2')
+    interaction.cth[,7] <- round(p.adjust(interaction.cth[,6]), 5)
+    interaction.cth[,8] <- round(mutoss::adaptiveBH(interaction.cth[,6], 0.05, silent = T)$adjPValues, 5) }
+}
+
+print(interaction.cth)
+
+print(subset(interaction.cth, interaction.cth$`p-value` < 0.05))
+
+sum(interaction.cth$`p-value` < 0.05)
+
+(passed.p.int <- subset(interaction.cth$ROI, interaction.cth$`p-value` < 0.05))
+
+print(subset(interaction.cth, interaction.cth$fdr < 0.05))
+
+sum(interaction.cth$fdr < 0.05)
+
+(cth.rm <- intersect(passed.p.int, passed.fdr.cth))       # IMPORTANT: is there any of the regions with a significant interaction (p < 0.05) also show a main effect?
+
+(passed.fdr.cth <- setdiff(passed.fdr.cth, cth.rm))       # if so, remove the main effect from the original main effect results list 
+
+length(passed.fdr.cth)
+
+# Update raw unstandardized coefficients and change with 27 regions instead of 28 (if there was a overlap between main/interaction, if not the results is the same as above)
+
+significant.models.list <- lapply(passed.fdr.cth, function(model_name) {
+  cth.model_list[[model_name]]
+})
+
+dv <- c()
+raw.beta <- c()
+intercept <- c() 
+
+for (i in 1:length(passed.fdr.cth)) {
+  dv[i] <- passed.fdr.cth[i]
+  raw.beta[i] <- summary(significant.models.list[[i]])[[10]][3,1]
+  intercept[i] <- summary(significant.models.list[[i]])[[10]][1,1]
+}
+
+(ct.change <- cbind(raw.beta, intercept) %>% 
+    as.data.frame() %>% 
+    mutate(change = (raw.beta / intercept) * 100))
+
+mean(ct.change$raw.beta)
+
+mean(ct.change$change)
+
+#~~~~~~~~~~~~~#
+# Save models #
+#~~~~~~~~~~~~~#
+
+for (i in passed.fdr.cth) {
+  model <- cth.model_list[[i]]
+  save(model, file = paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/models/main_roi_cth_', i, '.Rdata'))
+}
 
 posthoc1 %>% 
   mutate(label = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
-           filter(roi %in% posthoc1$ROI) %>% 
-           select(ggseg) %>% pull()) %>% 
-  select(ROI, label, everything()) %>% 
-  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/CT_results.csv'), row.names = F)
+           filter(roi %in% str_remove(posthoc1$ROI, '_cth')) %>% 
+           select(ggseg) %>% 
+           pull()) %>% 
+  mutate(label2 = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
+           filter(roi %in% str_remove(posthoc1$ROI, '_cth')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
+  select(ROI, label, label2, everything()) %>% 
+  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/tables/CT_results.csv'), row.names = F)
 
 posthoc1 %>% 
   mutate(label = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
-           filter(roi %in% posthoc1$ROI) %>% 
-           select(ggseg) %>% pull()) %>% 
+           filter(roi %in% str_remove(posthoc1$ROI, '_cth')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
+  mutate(label2 = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
+           filter(roi %in% str_remove(posthoc1$ROI, '_cth')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
   filter(`p-value` < 0.05) %>% 
-  select(ROI, label, everything()) %>% 
-  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/CT_results_p.csv'), row.names = F)
+  select(ROI, label, label2, everything()) %>% 
+  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/tables/CT_results_p.csv'), row.names = F)
 
 posthoc1 %>% 
   mutate(label = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
-           filter(roi %in% posthoc1$ROI) %>% 
-           select(ggseg) %>% pull()) %>% 
-  filter(fdr < 0.05) %>% 
-  select(ROI, label, everything()) %>% 
-  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/CT_results_fdr.csv'), row.names = F)
+           filter(roi %in% str_remove(posthoc1$ROI, '_cth')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
+  mutate(label2 = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
+           filter(roi %in% str_remove(posthoc1$ROI, '_cth')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
+  filter(ROI %in% passed.fdr.cth) %>% 
+  select(ROI, label, label2, everything()) %>% 
+  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/tables/CT_results_fdr.csv'), row.names = F)
 
-#4# Conduct follow-up analysis on Intracortical Myelin Content
+#####################################
+#####################################
+#5# Load AREA data for main analysis
+#####################################
+#####################################
 
-myel.df <- fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_MRI_data.csv')) %>% 
-  mutate_at(vars(all_of(covs2scale)), ~scale(., scale = F)) %>% 
-  rename_with(~ ifelse(grepl('^mrisdp_\\d+$', .) & !grepl('_myelin$', .), paste0(., '_ct'),
-                       ifelse(grepl('_myelin$', .), sub('_myelin$', '', .), .))) %>% 
-  select(-ends_with('_ct'))
+area.df <- brain %>% 
+  select(., !ends_with(c('_myelin', '_cth', '_ratio'))) %>% 
+  as.data.table()
 
-(featurenames2 <- names(myel.df %>% select(all_of(passed.fdr))))
+# Select only the predictors you want to analyze for VIF
+predictors <- area.df[, c('child_age', 'child_sex', 'premature', 'bfq_duration', 'education2', 'smri_vol_scs_intracranialv')]
 
-model_list <- list()        # Initialize an empty list to store models
+# Calculate VIFs
+(vif_results <- calculate_vif(predictors))
+
+(featurenames <- names(area.df %>% select(starts_with('mrisdp'))))
+
+area.model_list <- list()        # Initialize an empty list to store models
 
 # Iterate over each feature name
-for (feature in featurenames2) {
+for (feature in featurenames) {
   # Construct the formula string for the current feature
-  formula_str <- paste0(feature, " ~ child_age * bfq_duration + mode_of_delivery + birth_complications_n + pregnancy_complications + premature_wk + education_max + handedness_c + child_sex + (1 | src_subject_id)")  
+  formula_str <- paste0(feature, " ~ child_age * bfq_duration + premature + education2 + child_sex + smri_vol_scs_intracranialv + (1 | src_subject_id)")  
   # Fit the model using lmerTest::lmer and store in model_list
-  model <- lmerTest::lmer(as.formula(formula_str), data = myel.df)
-  model_list[[feature]] <- model
+  model <- lmerTest::lmer(as.formula(formula_str), data = area.df)
+  area.model_list[[feature]] <- model
 }
 
-posthoc2 <- as.data.frame(matrix(NA, nrow = length(featurenames2), ncol = 6))
+posthoc2 <- as.data.frame(matrix(NA, nrow = length(featurenames), ncol = 8))
 
-for (i in 1:length(model_list)) {
-  posthoc2[,1][[i]] <- names(model_list[i])
-  # beta estimate
-  posthoc2[,2][[i]] <- summary(model_list[[i]])[[10]][3,1]     # 3 for main, 11 for interaction
-  # confidence intervals min [1] and max [2]
-  ci.tmp <- as.numeric(confint(model_list[[i]], 'bfq_duration'))
-  posthoc2[,3][[i]] <- ci.tmp[1]
-  posthoc2[,4][[i]] <- ci.tmp[2]
+for (i in 1:length(area.model_list)) {
+  posthoc2[,1][[i]] <- names(area.model_list[i])
+  posthoc2[,2][[i]] <- length(!is.na(resid(area.model_list[[i]])))
+  ci.tmp <- effectsize::standardize_parameters(area.model_list[[i]], method = 'basic')
+  posthoc2[,3][[i]] <- ci.tmp[[2]][3]        # 3 for main, 8 for interaction --> why 8 and not 7? because in this model we have an extra variable (smri_vol_scs_intracranialv)
+  posthoc2[,4][[i]] <- ci.tmp[[4]][3]
+  posthoc2[,5][[i]] <- ci.tmp[[5]][3]
   # raw p-value
-  posthoc2[,5][[i]] <- summary(model_list[[i]])[[10]][3,5]
-  if (sum(is.na(posthoc2[,5]) < length(posthoc2[,5]))) {
-    names(posthoc2) <- c('ROI', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr')
-    posthoc2[,6] <- round(p.adjust(posthoc2[,5], method = 'fdr'), 5) }
+  posthoc2[,6][[i]] <- round(summary(area.model_list[[i]])[[10]][3,5], 5)
+  if (sum(is.na(posthoc2[,6]) < length(posthoc2[,6]))) {
+    names(posthoc2) <- c('ROI', 'n', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr', 'fdr2')
+    posthoc2[,7] <- round(p.adjust(posthoc2[,6], method = 'fdr'), 5)
+    posthoc2[,8] <- round(mutoss::adaptiveBH(posthoc2[,6], 0.05, silent = T)$adjPValues, 5) }
+    # posthoc2[,8] <- round(cp4p::adjust.p(posthoc2[,6], pi0.method = 'bky', alpha = 0.05)$adjp[,2], 5) }
 }
-  
+
 print(posthoc2)
 
 print(subset(posthoc2, posthoc2$`p-value` < 0.05))
 
 sum(posthoc2$`p-value` < 0.05)
 
-posthoc2 %>% 
-  mutate(label = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
-           filter(roi %in% posthoc2$ROI) %>% 
-           select(ggseg) %>% pull()) %>% 
-  select(ROI, label, everything()) %>% 
-  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/Myel_results.csv'), row.names = F)
+print(subset(posthoc2, posthoc2$fdr2 < 0.05))
+
+sum(posthoc2$fdr < 0.05)
+
+(passed.fdr.area <- subset(posthoc2$ROI, posthoc2$fdr < 0.05))
+
+significant.models.list <- lapply(passed.fdr.area, function(model_name) {
+  area.model_list[[model_name]]
+})
+
+dv <- c()
+raw.beta <- c()
+intercept <- c()  
+
+for (i in 1:length(passed.fdr.area)) {
+  dv[i] <- passed.fdr.area[i]
+  raw.beta[i] <- summary(significant.models.list[[i]])[[10]][3,1]
+  intercept[i] <- summary(significant.models.list[[i]])[[10]][1,1]
+}
+
+(area.change <- cbind(dv, raw.beta, intercept) %>% 
+  as.data.frame() %>% 
+  mutate(raw.beta = as.numeric(raw.beta),
+         intercept = as.numeric(intercept),
+          perc_change = (raw.beta / intercept) * 100))
+
+mean(area.change$raw.beta)
+
+mean(area.change$perc_change)
+
+area.change$dv[which.max(area.change$perc_change)]
+
+# Look interactions
+
+interaction.area <- as.data.frame(matrix(NA, nrow = length(featurenames), ncol = 7))
+
+for (i in 1:length(area.model_list)) {
+  interaction.area[,1][[i]] <- names(area.model_list[i])
+  interaction.area[,2][[i]] <- length(!is.na(resid(area.model_list[[i]])))
+  ci.tmp <- effectsize::standardize_parameters(area.model_list[[i]], method = 'basic')
+  interaction.area[,3][[i]] <- ci.tmp[[2]][8]    # 3 main effect, 8 interaction
+  interaction.area[,4][[i]] <- ci.tmp[[4]][8]
+  interaction.area[,5][[i]] <- ci.tmp[[5]][8]
+  # raw p-value
+  interaction.area[,6][[i]] <- round(summary(area.model_list[[i]])[[10]][8,5], 5)
+  if (sum(is.na(interaction.area[,6]) < length(interaction.area[,6]))) {
+    names(interaction.area) <- c('ROI', 'n', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr')
+    interaction.area[,7] <- round(p.adjust(interaction.area[,6]), 5) }
+}
+
+print(interaction.area)
+
+print(subset(interaction.area, interaction.area$`p-value` < 0.05))
+
+sum(interaction.area$`p-value` < 0.05)
+
+(passed.p.int <- subset(interaction.area$ROI, interaction.area$`p-value` < 0.05))
+
+print(subset(interaction.area, interaction.area$fdr < 0.05))
+
+intersect(passed.p.int, passed.fdr.area)
+
+(area.rm <- intersect(passed.p.int, passed.fdr.area))
+
+(passed.fdr.area <- setdiff(passed.fdr.area, area.rm))
+
+length(passed.fdr.area)    # 51 instead of 52 because 1 region (mrisdp_146_area) showed both main and interaction effects and we favor the higher-order term (interaction)
+
+# recalculate
+
+dv <- c()
+raw.beta <- c()
+intercept <- c()  
+
+for (i in 1:length(passed.fdr.area)) {
+  dv[i] <- passed.fdr.area[i]
+  raw.beta[i] <- summary(significant.models.list[[i]])[[10]][3,1]
+  intercept[i] <- summary(significant.models.list[[i]])[[10]][1,1]
+}
+
+(area.change <- cbind(dv, raw.beta, intercept) %>% 
+    as.data.frame() %>% 
+    mutate(raw.beta = as.numeric(raw.beta),
+           intercept = as.numeric(intercept),
+           perc_change = (raw.beta / intercept) * 100))
+
+mean(area.change$raw.beta)
+
+mean(area.change$perc_change)
+
+#~~~~~~~~~~~~~#
+# Save models #
+#~~~~~~~~~~~~~#
+
+for (i in passed.fdr.area) {
+  model <- area.model_list[[i]]
+  save(model, file = paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/models/main_roi_area_', i, '.Rdata'))
+}
 
 posthoc2 %>% 
   mutate(label = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
-           filter(roi %in% posthoc2$ROI) %>% 
-           select(ggseg) %>% pull()) %>% 
+           filter(roi %in% str_remove(posthoc2$ROI, '_area')) %>% 
+           select(ggseg) %>% 
+           pull()) %>% 
+  mutate(label2 = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
+           filter(roi %in% str_remove(posthoc2$ROI, '_area')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
+  select(ROI, label, label2, everything()) %>% 
+  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/tables/AREA_results.csv'), row.names = F)
+
+posthoc2 %>% 
+  mutate(label = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
+           filter(roi %in% str_remove(posthoc2$ROI, '_area')) %>% 
+           select(ggseg) %>% 
+           pull()) %>% 
+  mutate(label2 = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
+           filter(roi %in% str_remove(posthoc2$ROI, '_area')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
   filter(`p-value` < 0.05) %>% 
-  select(ROI, label, everything()) %>% 
-  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/Myel_results_p.csv'), row.names = F)
+  select(ROI, label, label2, everything()) %>% 
+  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/tables/AREA_results_p.csv'), row.names = F)
 
-#5# Conduct supplementary analysis on cognition
-
-(covs2scale2 <- c(covs2scale, 'vision'))
-
-cog.df <- fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_COG_data.csv')) %>% 
-  mutate_at(vars(all_of(covs2scale2)), ~scale(., scale = F)) %>% 
-  select(., !ends_with('_myelin'))
-
-(featurenames3 <- names(cog.df %>% select(starts_with(c('nih', 'pea', 'lmt')))))
-
-cog.df$cognition <- cog.df %>% group_by(eventname) %>% mutate_at(vars(all_of(featurenames3)), ~scale(., scale = T)) %>% ungroup() %>% mutate(cognition = rowMeans(select(., all_of(featurenames3)))) %>% select(cognition) 
-
-(featurenames3 <- c('cognition', featurenames3))
-
-# Initialize an empty list to store models
-model_list <- list()
-
-# Iterate over each feature name
-for (feature in featurenames3) {
-  # Construct the formula string for the current feature
-  formula_str <- paste0(feature, " ~ child_age * bfq_duration + mode_of_delivery + birth_complications_n + pregnancy_complications + premature_wk + education_max + handedness_c + child_sex + vision + (1 | src_subject_id)")
-  # Fit the model using lmerTest::lmer and store in model_list
-  model <- lmerTest::lmer(as.formula(formula_str), data = cog.df)
-  model_list[[feature]] <- model
-}
-
-posthoc3 <- as.data.frame(matrix(NA, nrow = length(featurenames3), ncol = 6))
-
-for (i in 1:length(model_list)) {
-  posthoc3[,1][[i]] <- names(model_list[i])
-  # beta estimate
-  posthoc3[,2][[i]] <- round(summary(model_list[[i]])[[10]][3,1], 3)     # 3 for main, 13 for interaction
-  # confidence intervals min [1] and max [2]
-  ci.tmp <- confint(model_list[[i]], 'bfq_duration')
-  posthoc3[,3][[i]] <- ci.tmp[1]
-  posthoc3[,4][[i]] <- ci.tmp[2]
-  # raw p-value
-  posthoc3[,5][[i]] <- round(summary(model_list[[i]])[[10]][3,5], 5)
-  if (sum(is.na(posthoc3[,5]) < length(posthoc3[,5]))) {
-    names(posthoc3) <- c('ROI', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr')
-    posthoc3[,6] <- round(p.adjust(posthoc3[,5], method = 'fdr'), 5) }
-}
-
-print(posthoc3)
-
-print(subset(posthoc3, posthoc3$`p-value` < 0.05))
-
-sum(posthoc3$`p-value` < 0.05)
-
-# Now test what regions are related to cognition
-
-model_list <- list()
-
-# Define main predictors
-(main_predictors <- names(cog.df %>% select(., all_of(passed.fdr))))
-
-for (main_pred in main_predictors) {
-  # Construct the formula string for the current feature and main predictor
-  formula_str <- paste0("cognition ~ child_age * ", main_pred, "+ mode_of_delivery + birth_complications_n + pregnancy_complications + premature_wk + education_max + handedness_c + child_sex + vision + (1 | src_subject_id)")
-  # Fit the model using lmerTest::lmer and store in model_list
-  model_list[[main_pred]] <- lmerTest::lmer(as.formula(formula_str), data = cog.df)
-}
-
-posthoc4 <- as.data.frame(matrix(NA, nrow = length(main_predictors), ncol = 6))
-
-for (i in 1:length(model_list)) {
-  posthoc4[,1][[i]] <- names(model_list[i])
-  # beta estimate
-  posthoc4[,2][[i]] <- round(summary(model_list[[i]])[[10]][3,1], 3)     # 3 for main, 13 for interaction
-  # confidence intervals min [1] and max [2]
-  ci.tmp <- confint(model_list[[i]], names(model_list[i]))
-  posthoc4[,3][[i]] <- ci.tmp[1]
-  posthoc4[,4][[i]] <- ci.tmp[2]
-  # raw p-value
-  posthoc4[,5][[i]] <- round(summary(model_list[[i]])[[10]][3,5], 5)
-  if (sum(is.na(posthoc4[,5]) < length(posthoc4[,5]))) {
-    names(posthoc4) <- c('ROI', 'beta', 'ci.min', 'ci.max', 'p-value', 'fdr')
-    posthoc4[,6] <- round(p.adjust(posthoc4[,5], method = 'fdr'), 3) }
-}
-
-print(posthoc4)
-
-print(subset(posthoc4, posthoc4$`p-value` < 0.05))
-
-sum(posthoc4$`p-value` < 0.05)
-
-(passed.p <- subset(posthoc4$ROI, posthoc4$`p-value` < 0.05))
-
-posthoc4 %>% 
+posthoc2 %>% 
   mutate(label = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
-           filter(roi %in% posthoc4$ROI) %>% 
-           select(ggseg) %>% pull()) %>% 
-  select(ROI, label, everything()) %>% 
-  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/CogCT_results.csv'), row.names = F)
+           filter(roi %in% str_remove(posthoc2$ROI, '_area')) %>% 
+           select(ggseg) %>% 
+           pull()) %>% 
+  mutate(label2 = readxl::read_xlsx(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_ggseg.xlsx')) %>% 
+           filter(roi %in% str_remove(posthoc2$ROI, '_area')) %>% 
+           select(label2) %>% 
+           pull()) %>% 
+  filter(ROI %in% passed.fdr.area) %>% 
+  select(ROI, label, label2, everything()) %>% 
+  write.csv(., paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/tables/AREA_results_fdr.csv'), row.names = F)
 
-(featurenames3 <- setdiff(featurenames3, 'cognition'))
+# Overlap between CT and SA?
 
-covs <- c('mode_of_delivery', 'birth_complications_n', 'pregnancy_complications', 'premature_wk', 'handedness_c', 'education_max', 'child_sex', 'child_age', 'vision')
+passed.fdr.cth
+passed.fdr.area
+length(common <- intersect(str_remove(passed.fdr.cth, '_cth'), str_remove(passed.fdr.area, '_area'))) # how many overlapping CT and SA regions
+common # overlaping CT and SA regions with a main effect for breastfeeding
 
-# lav.df <- fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_COG_data.csv')) %>%
-#   mutate(eventname = ifelse(eventname == 'baseline_year_1_arm_1', 'y0', 'y2')) %>%
-#   select(., src_subject_id, eventname, child_age, bfq_duration, vision, all_of(c(passed.p, covs, featurenames3))) %>%
-#   group_by(eventname) %>%
-#   mutate_at(vars(c(all_of(c(featurenames3, passed.p)), child_age, bfq_duration, vision)), ~as.numeric(scale(., scale = T))) %>%
-#   ungroup() %>%
-#   mutate(brain = rowMeans(select(., all_of(passed.p))),
-#          cognition = rowMeans(select(., all_of(featurenames3)))) %>%
-#   select(-all_of(passed.p), -starts_with(c('nih', 'pea', 'lmt'))) %>%
-#   pivot_wider(names_from = 'eventname', values_from = c(brain, cognition, child_age, vision))
-
-extract_mediation_summary <- function (x) { 
-  
-  clp <- 100 * x$conf.level
-  isLinear.y <- ((class(x$model.y)[1] %in% c("lm", "rq")) || 
-                   (inherits(x$model.y, "glm") && x$model.y$family$family == 
-                      "gaussian" && x$model.y$family$link == "identity") || 
-                   (inherits(x$model.y, "survreg") && x$model.y$dist == 
-                      "gaussian"))
-  
-  printone <- !x$INT && isLinear.y
-  
-  if (printone) {
-    
-    smat <- c(x$d1, x$d1.ci, x$d1.p)
-    smat <- rbind(smat, c(x$z0, x$z0.ci, x$z0.p))
-    smat <- rbind(smat, c(x$tau.coef, x$tau.ci, x$tau.p))
-    smat <- rbind(smat, c(x$n0, x$n0.ci, x$n0.p))
-    
-    rownames(smat) <- c("ACME", "ADE", "Total Effect", "Prop. Mediated")
-    
-  } else {
-    smat <- c(x$d0, x$d0.ci, x$d0.p)
-    smat <- rbind(smat, c(x$d1, x$d1.ci, x$d1.p))
-    smat <- rbind(smat, c(x$z0, x$z0.ci, x$z0.p))
-    smat <- rbind(smat, c(x$z1, x$z1.ci, x$z1.p))
-    smat <- rbind(smat, c(x$tau.coef, x$tau.ci, x$tau.p))
-    smat <- rbind(smat, c(x$n0, x$n0.ci, x$n0.p))
-    smat <- rbind(smat, c(x$n1, x$n1.ci, x$n1.p))
-    smat <- rbind(smat, c(x$d.avg, x$d.avg.ci, x$d.avg.p))
-    smat <- rbind(smat, c(x$z.avg, x$z.avg.ci, x$z.avg.p))
-    smat <- rbind(smat, c(x$n.avg, x$n.avg.ci, x$n.avg.p))
-    
-    rownames(smat) <- c("ACME (control)", "ACME (treated)", 
-                        "ADE (control)", "ADE (treated)", "Total Effect", 
-                        "Prop. Mediated (control)", "Prop. Mediated (treated)", 
-                        "ACME (average)", "ADE (average)", "Prop. Mediated (average)")
-    
-  }
-  
-  colnames(smat) <- c("Estimate", paste(clp, "% CI Lower", sep = ""), 
-                      paste(clp, "% CI Upper", sep = ""), "p-value")
-  smat
-  
-}
-
-med.y0 <- fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_COG_data.csv')) %>%
-  filter(eventname == 'baseline_year_1_arm_1') %>%
-  select(., src_subject_id, eventname, child_age, bfq_duration, vision, all_of(c(passed.p, covs)), starts_with(c('nih', 'pea', 'lmt'))) %>%
-  mutate_at(vars(starts_with(c('nih', 'pea', 'lmt'))), ~as.numeric(scale(., scale = T))) %>%
-  mutate_at(vars(c(pregnancy_complications, birth_complications_n)), ~as.factor(.)) %>% 
-  mutate(mode_of_delivery = as.factor(ifelse(mode_of_delivery == 'Vaginal', 0, 1)),
-         child_sex = as.factor(ifelse(child_sex == 'Male', 1, 0)),
-         brain = rowMeans(select(., all_of(passed.p))),
-         cognition = rowMeans(select(., starts_with(c('nih', 'pea', 'lmt'))))) %>%
-  select(-all_of(passed.p), -starts_with(c('nih', 'pea', 'lmt'))) %>% 
-  mutate(across(where(is.numeric), ~as.vector(scale(., scale = T))))
-
-# baseline - baseline
-
-covs_y0 <- c('mode_of_delivery', 'birth_complications_n', 'pregnancy_complications', 'premature_wk', 'handedness_c', 'education_max', 'child_sex', 'child_age', 'vision')
-
-summary(mediator_modely0 <- lm(brain ~ bfq_duration + mode_of_delivery + birth_complications_n + pregnancy_complications + handedness_c + premature_wk + education_max + child_sex + child_age + vision, med.y0))
-summary(outcome_modely0 <- lm(cognition ~ brain + bfq_duration + mode_of_delivery + birth_complications_n + pregnancy_complications + handedness_c + premature_wk + education_max + child_sex + child_age + vision, med.y0))
-
-confint(outcome_modely0, 'bfq_duration')     # lactation on cognition
-confint(mediator_modely0, 'bfq_duration')    # lactation on brain
-confint(outcome_modely0, 'brain')            # brain on cognition
-
-set.seed(4994)
-
-mediation_resultsy0 <- mediation::mediate(mediator_modely0, outcome_modely0, treat = 'bfq_duration', mediator = 'brain', covariates = covs_y0, boot = T, sims = 5000)
-
-(medy0 <- extract_mediation_summary(summary(mediation_resultsy0)))
-
-write.csv(medy0, paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/ABCD_medy0.csv'))
-
-# follow up - follow up
-
-med.y2 <- fread(paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_data/ABCD_COG_data.csv')) %>%
-  filter(eventname != 'baseline_year_1_arm_1') %>%
-  select(., src_subject_id, eventname, child_age, bfq_duration, vision, all_of(c(passed.p, covs)), starts_with(c('nih', 'pea', 'lmt'))) %>%
-  mutate_at(vars(starts_with(c('nih', 'pea', 'lmt'))), ~as.numeric(scale(., scale = T))) %>%
-  mutate_at(vars(c(pregnancy_complications, birth_complications_n)), ~as.factor(.)) %>% 
-  mutate(mode_of_delivery = as.factor(ifelse(mode_of_delivery == 'Vaginal', 0, 1)),
-         child_sex = as.factor(ifelse(child_sex == 'Male', 1, 0)),
-         brain = rowMeans(select(., all_of(passed.p))),
-         cognition = rowMeans(select(., starts_with(c('nih', 'pea', 'lmt'))))) %>%
-  select(-all_of(passed.p), -starts_with(c('nih', 'pea', 'lmt'))) %>% 
-  mutate(across(where(is.numeric), ~as.vector(scale(., scale = T))))
-
-covs_y2 <- c('mode_of_delivery', 'birth_complications_n', 'pregnancy_complications', 'premature_wk', 'handedness_c', 'education_max', 'child_sex', 'child_age', 'vision')
-
-summary(mediator_modely2 <- lm(brain ~ bfq_duration + mode_of_delivery + birth_complications_n + pregnancy_complications + handedness_c + premature_wk + education_max + child_sex + child_age + vision, med.y2))
-summary(outcome_modely2 <- lm(cognition ~ brain + bfq_duration + mode_of_delivery + birth_complications_n + pregnancy_complications + handedness_c + premature_wk + education_max + child_sex + child_age + vision, med.y2))
-
-confint(outcome_modely2, 'bfq_duration')     # lactation on cognition
-confint(mediator_modely2, 'bfq_duration')    # lactation on brain
-confint(outcome_modely2, 'brain')    
-
-set.seed(4994)
-
-mediation_resultsy2 <- mediation::mediate(mediator_modely2, outcome_modely2, treat = 'bfq_duration', mediator = 'brain', covariates = covs_y2, boot = T, sims = 5000)
-
-(medy2 <- extract_mediation_summary(summary(mediation_resultsy2)))
-
-write.csv(medy2, paste0(drivedir, 'Lab_member_files/Jonatan_files/abcd_bf_results/ABCD_medy2.csv'))
 
