@@ -320,7 +320,7 @@ bad.mrif.y0 <- fread(paste0(datadir, 'ABCD_data/ABCD5.1/core/imaging/mri_y_qc_cl
             pull()
 
 bad.mrif.y2 <- fread(paste0(datadir, 'ABCD_data/ABCD5.1/core/imaging/mri_y_qc_clfind.csv')) %>%
-  filter(eventname != '2_year_follow_up_y_arm_1',
+  filter(eventname == '2_year_follow_up_y_arm_1',
          !between(mrif_score, 1, 2)) %>%                                              # flag those with artifacts (0), abnormalities considering referral (3) and immediate referral (4) --> 776 excluded at follow up 
   select(src_subject_id) %>% 
   pull()
